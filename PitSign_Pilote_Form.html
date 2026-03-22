@@ -99,7 +99,8 @@ const PDF_FIELD_MAPS = {
       { field:'email', x:202, y:617, size:10 },
       { field:'roulageDate', x:115, y:598, size:10 },
       { field:'telUrgence', x:443, y:598, size:10 }
-    ]
+    ],
+    signaturePage:1, signatureCoords:{x:380,y:305,w:160,h:55}, dateCoords:{x:80,y:359,size:10}, parapheCoords:{page:0,x:100,y:57,w:100,h:35}
   },
   team_mrl_decharge: {
     page1: [
@@ -112,10 +113,11 @@ const PDF_FIELD_MAPS = {
       { field:'vehicule', x:210, y:551, size:10 },
       { field:'permis', x:186, y:538, size:10 }
     ],
-    insuranceCheckboxes: { souscrit:{ x:65, y:150, size:11 }, nonSouscrit:{ x:65, y:137, size:11 } }
+    insuranceCheckboxes: { souscrit:{ x:65, y:150, size:11 }, nonSouscrit:{ x:65, y:137, size:11 } },
+    signaturePage:1, signatureCoords:{x:65,y:340,w:160,h:50}, faitA:{x:100,y:435,size:9}, dateLe:{x:82,y:422,size:10}
   },
-  reglement_piste: { page1:[] },
-  reglement_interieur: { page1:[] }
+  reglement_piste: { page1:[], signaturePage:0, signatureCoords:{x:350,y:60,w:180,h:55} },
+  reglement_interieur: { page1:[], signaturePage:4, signatureCoords:{x:350,y:60,w:180,h:55} }
 };
 
 let pilot = null;
@@ -202,10 +204,12 @@ function renderForm() {
   DOCS.forEach((d, i) => {
     const signed = sigs[d.id];
     html += `<div class="doc-card ${signed?'signed':''}">
-      <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
         <div><div class="doc-title">${signed?'✅':'⏳'} ${d.title}</div>
         <div class="doc-status">${signed ? 'Signé le '+new Date(signed.signed_at).toLocaleString('fr-FR') : 'En attente de signature'}</div></div>
-        ${signed ? '<span class="badge badge-success">Signé</span>' : `<button class="btn-outline btn" style="width:auto;padding:8px 16px;font-size:13px" onclick="openDoc(${i})">Lire & Signer</button>`}
+        <div style="display:flex;gap:6px">
+          ${signed ? `<button class="btn-outline btn" style="width:auto;padding:6px 12px;font-size:12px" onclick="downloadSignedPDF('${d.id}','${d.pdfKey}','${d.title}')">📥 PDF</button><span class="badge badge-success">Signé</span>` : `<button class="btn-outline btn" style="width:auto;padding:8px 16px;font-size:13px" onclick="openDoc(${i})">Lire & Signer</button>`}
+        </div>
       </div>
     </div>`;
   });
@@ -215,6 +219,8 @@ function renderForm() {
       <div style="font-size:40px;margin-bottom:8px">🏁</div>
       <div style="font-size:18px;font-weight:600;color:var(--success)">Tous les documents sont signés !</div>
       <p style="color:var(--text2);font-size:14px;margin-top:8px">Présentez-vous à l'accueil le jour J pour valider votre check-in.</p>
+      <button class="btn btn-primary" onclick="downloadAllPDFs()" style="margin-top:16px;width:auto;padding:12px 32px">📥 Télécharger tous mes documents signés</button>
+      <p id="dl-all-msg" style="font-size:12px;color:var(--text2);margin-top:8px"></p>
     </div>`;
   }
 
@@ -378,6 +384,114 @@ async function submitSignature() {
   } catch(err) {
     msgEl.innerHTML = '<span style="color:var(--accent)">❌ Erreur: '+err.message+'</span>';
   }
+}
+
+// === PDF DOWNLOAD ===
+function getPilotValues() {
+  return {
+    fullName: `${pilot.nom||''} ${pilot.prenom||''}`.toUpperCase(),
+    nom: (pilot.nom||'').toUpperCase(), prenom: pilot.prenom||'',
+    dob: pilot.date_naissance ? new Date(pilot.date_naissance+'T00:00:00').toLocaleDateString('fr-FR') : '',
+    birthplace: pilot.lieu_naissance||'', adresse: pilot.adresse||'',
+    cpVille: `${pilot.code_postal||''} ${pilot.ville||''}`,
+    tel: pilot.telephone||'', email: pilot.email||'',
+    roulageDate: '18/04/2026 & 19/04/2026', telUrgence: pilot.tel_urgence||'',
+    vehicule: pilot.vehicule||'', permis: pilot.num_permis||''
+  };
+}
+
+async function buildPDF(docId, pdfKey) {
+  const sig = sigs[docId];
+  if (!sig) return null;
+  const b64 = PDF_DATA[pdfKey];
+  if (!b64) return null;
+  const fm = PDF_FIELD_MAPS[pdfKey];
+
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const pdf = await PDFLib.PDFDocument.load(bytes);
+  const font = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
+  const pg = pdf.getPages();
+  const vals = getPilotValues();
+
+  // Fill fields
+  if (fm.page1 && fm.page1.length) {
+    const page = pg[0];
+    fm.page1.forEach(f => {
+      const v = vals[f.field] || '';
+      if (v) page.drawText(v, { x: f.x, y: f.y, size: f.size || 10, font, color: PDFLib.rgb(0.1, 0.1, 0.3) });
+    });
+  }
+
+  // Signature
+  if (sig.signature_image) {
+    const si = await fetch(sig.signature_image).then(r => r.arrayBuffer());
+    const img = await pdf.embedPng(si);
+    const spIdx = fm.signaturePage != null ? fm.signaturePage : pg.length - 1;
+    const sp = pg[spIdx];
+    if (fm.signatureCoords) sp.drawImage(img, { x: fm.signatureCoords.x, y: fm.signatureCoords.y, width: fm.signatureCoords.w, height: fm.signatureCoords.h });
+    else sp.drawImage(img, { x: 350, y: 80, width: 180, height: 60 });
+    if (fm.parapheCoords) pg[fm.parapheCoords.page || 0].drawImage(img, { x: fm.parapheCoords.x, y: fm.parapheCoords.y, width: fm.parapheCoords.w, height: fm.parapheCoords.h });
+  }
+
+  // Date
+  const dateText = new Date(sig.signed_at).toLocaleDateString('fr-FR');
+  if (fm.dateCoords) {
+    const spIdx = fm.signaturePage != null ? fm.signaturePage : pg.length - 1;
+    pg[spIdx].drawText(dateText, { x: fm.dateCoords.x, y: fm.dateCoords.y, size: 10, font, color: PDFLib.rgb(0.1, 0.1, 0.3) });
+  }
+  if (fm.dateLe) {
+    const spIdx = fm.signaturePage != null ? fm.signaturePage : pg.length - 1;
+    pg[spIdx].drawText(dateText, { x: fm.dateLe.x, y: fm.dateLe.y, size: 10, font, color: PDFLib.rgb(0.1, 0.1, 0.3) });
+  }
+  if (fm.faitA) {
+    const spIdx = fm.signaturePage != null ? fm.signaturePage : pg.length - 1;
+    pg[spIdx].drawText('Circuit du Mas du Clos', { x: fm.faitA.x, y: fm.faitA.y, size: 9, font, color: PDFLib.rgb(0.1, 0.1, 0.3) });
+  }
+
+  // Insurance checkbox
+  if (fm.insuranceCheckboxes && sig.insurance_choice) {
+    const fb = await pdf.embedFont(PDFLib.StandardFonts.HelveticaBold);
+    const cb = fm.insuranceCheckboxes;
+    const chosen = sig.insurance_choice === 'souscrit' ? cb.souscrit : cb.nonSouscrit;
+    pg[0].drawText('X', { x: chosen.x, y: chosen.y, size: chosen.size || 11, font: fb, color: PDFLib.rgb(0.1, 0.1, 0.3) });
+  }
+
+  // Audit stamp
+  pg[pg.length - 1].drawText(`Signé numériquement le ${new Date(sig.signed_at).toLocaleString('fr-FR')} via PitSign`, {
+    x: 50, y: 20, size: 7, font, color: PDFLib.rgb(0.5, 0.5, 0.5)
+  });
+
+  return await pdf.save();
+}
+
+async function downloadSignedPDF(docId, pdfKey, title) {
+  try {
+    const pdfBytes = await buildPDF(docId, pdfKey);
+    if (!pdfBytes) { alert('Impossible de générer le PDF.'); return; }
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title.replace(/[^a-zA-Z0-9àâäéèêëïîôùûü]/g, '_')}_${pilot.nom}_${pilot.prenom}.pdf`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) { alert('Erreur: ' + err.message); }
+}
+
+async function downloadAllPDFs() {
+  const msgEl = document.getElementById('dl-all-msg');
+  msgEl.textContent = '⏳ Génération des PDFs...';
+  let count = 0;
+  for (const doc of DOCS) {
+    if (!sigs[doc.id]) continue;
+    try {
+      await downloadSignedPDF(doc.id, doc.pdfKey, doc.title);
+      count++;
+      msgEl.textContent = `⏳ ${count} PDF(s) téléchargé(s)...`;
+      await new Promise(r => setTimeout(r, 500)); // small delay between downloads
+    } catch (e) { console.error(e); }
+  }
+  msgEl.innerHTML = `<span style="color:var(--success)">✅ ${count} document(s) téléchargé(s) !</span>`;
 }
 
 init();
