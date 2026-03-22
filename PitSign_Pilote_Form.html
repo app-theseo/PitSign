@@ -122,6 +122,7 @@ const PDF_FIELD_MAPS = {
 
 let pilot = null;
 let sigs = {};
+let docsRead = {};
 let currentDocIdx = -1;
 let sigCanvas, sigCtx, sigDrawing = false, sigHasContent = false;
 
@@ -199,20 +200,62 @@ function renderForm() {
   </div>
 
   <div class="card">
-    <div class="card-title">✍️ Documents à signer</div>`;
+    <div class="card-title">✍️ Documents à lire et signer</div>`;
+
+  const allRead = DOCS.every(d => sigs[d.id] || docsRead[d.id]);
+  const someUnsigned = DOCS.some(d => !sigs[d.id]);
 
   DOCS.forEach((d, i) => {
     const signed = sigs[d.id];
-    html += `<div class="doc-card ${signed?'signed':''}">
+    const read = docsRead[d.id];
+    html += `<div class="doc-card ${signed?'signed':read?'':''}">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <div><div class="doc-title">${signed?'✅':'⏳'} ${d.title}</div>
-        <div class="doc-status">${signed ? 'Signé le '+new Date(signed.signed_at).toLocaleString('fr-FR') : 'En attente de signature'}</div></div>
+        <div><div class="doc-title">${signed?'✅':read?'👁':'⏳'} ${d.title}</div>
+        <div class="doc-status">${signed ? 'Signé le '+new Date(signed.signed_at).toLocaleString('fr-FR') : read ? '✓ Lu — en attente de signature' : 'À lire'}</div></div>
         <div style="display:flex;gap:6px">
-          ${signed ? `<button class="btn-outline btn" style="width:auto;padding:6px 12px;font-size:12px" onclick="downloadSignedPDF('${d.id}','${d.pdfKey}','${d.title}')">📥 PDF</button><span class="badge badge-success">Signé</span>` : `<button class="btn-outline btn" style="width:auto;padding:8px 16px;font-size:13px" onclick="openDoc(${i})">Lire & Signer</button>`}
+          ${signed ? `<button class="btn-outline btn" style="width:auto;padding:6px 12px;font-size:12px" onclick="downloadSignedPDF('${d.id}','${d.pdfKey}','${d.title}')">📥 PDF</button><span class="badge badge-success">Signé</span>` : `<button class="btn-outline btn" style="width:auto;padding:8px 16px;font-size:13px" onclick="readDoc(${i})">${read?'👁 Relire':'📄 Lire le document'}</button>`}
         </div>
       </div>
     </div>`;
   });
+
+  // Unified signature section (only if all read but not all signed)
+  if (allRead && someUnsigned) {
+    html += `<div style="margin-top:20px;padding:20px;background:var(--card);border:2px solid var(--accent);border-radius:var(--radius-lg)">
+      <div style="font-family:Rajdhani;font-weight:700;font-size:18px;margin-bottom:4px">✅ Tous les documents ont été lus</div>
+      <p style="color:var(--text2);font-size:14px;margin-bottom:16px">En signant ci-dessous, vous acceptez l'ensemble des 4 documents présentés.</p>
+
+      <div style="padding:12px;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px">
+        <div class="form-label" style="margin-bottom:6px">Clause assurance — Article L321-1</div>
+        <div class="insurance-opt">
+          <label><input type="radio" name="ins" value="souscrit"> J'ai souscrit une assurance</label>
+          <label><input type="radio" name="ins" value="nonSouscrit" checked> Pas d'assurance, je participe en connaissance de cause</label>
+        </div>
+      </div>
+
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin-bottom:16px">
+        <input type="checkbox" id="accept-all-cb"> J'ai lu et j'accepte les termes des 4 documents ci-dessus
+      </label>
+
+      <div id="sig-unified" style="display:none">
+        <div class="form-label">Votre signature (valable pour les 4 documents)</div>
+        <div class="sig-area" id="sig-area">
+          <canvas id="sig-canvas" width="660" height="180"></canvas>
+          <div class="sig-placeholder" id="sig-ph">Signez ici</div>
+        </div>
+        <div style="display:flex;gap:8px;margin:8px 0">
+          <button class="btn btn-outline" style="flex:1" onclick="clearSig()">🗑 Effacer</button>
+        </div>
+        <button class="btn btn-primary" onclick="submitAllSignatures()" style="font-size:16px;padding:14px">✅ Signer les 4 documents</button>
+        <p id="sig-msg" style="text-align:center;font-size:13px;margin-top:8px"></p>
+      </div>
+    </div>`;
+  } else if (!someUnsigned) {
+    // All signed - no separate else needed, falls into allSigned below
+  } else {
+    const readCount = DOCS.filter(d => sigs[d.id] || docsRead[d.id]).length;
+    html += `<div style="text-align:center;color:var(--text-muted);padding:16px;margin-top:8px">📄 Lisez les ${DOCS.length - readCount} document(s) restant(s) pour débloquer la signature.</div>`;
+  }
 
   if (allSigned) {
     html += `<div style="text-align:center;padding:20px;background:var(--success-bg);border-radius:var(--radius-lg);border:1px solid rgba(46,204,113,0.3);margin-top:16px">
@@ -226,6 +269,16 @@ function renderForm() {
 
   html += '</div>';
   app.innerHTML = html;
+
+  // Attach accept-all checkbox listener
+  const acceptCb = document.getElementById('accept-all-cb');
+  if (acceptCb) {
+    acceptCb.addEventListener('change', function() {
+      const sec = document.getElementById('sig-unified');
+      if (sec) { sec.style.display = this.checked ? 'block' : 'none'; }
+      if (this.checked) initSigPad();
+    });
+  }
 }
 
 async function saveInfo() {
@@ -251,50 +304,25 @@ async function saveInfo() {
   }
 }
 
-function openDoc(idx) {
-  currentDocIdx = idx;
+function readDoc(idx) {
   const doc = DOCS[idx];
-  const isTeamMRL = doc.pdfKey === 'team_mrl_decharge';
-
   const app = document.getElementById('app');
-  let html = `<div class="card">
-    <div style="cursor:pointer;color:var(--text2);margin-bottom:12px" onclick="renderForm()">← Retour</div>
+  app.innerHTML = `<div class="card">
+    <div style="cursor:pointer;color:var(--text2);margin-bottom:12px" onclick="markRead(${idx})">← Retour (marquer comme lu)</div>
     <div class="card-title">${doc.title}</div>
-    <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Lisez le document ci-dessous puis signez en bas de page.</p>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:12px">Lisez le document ci-dessous, puis revenez en arrière.</p>
     <div id="pdf-loading" style="text-align:center;padding:20px;color:var(--text2)">⏳ Chargement du PDF...</div>
-    <iframe id="pdf-frame" class="pdf-frame" style="display:none"></iframe>`;
-
-  if (isTeamMRL) {
-    html += `<div style="padding:12px;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius);margin:12px 0">
-      <div class="form-label" style="margin-bottom:6px">Clause assurance — Article L321-1</div>
-      <div class="insurance-opt">
-        <label><input type="radio" name="ins" value="souscrit"> J'ai souscrit une assurance</label>
-        <label><input type="radio" name="ins" value="nonSouscrit" checked> Pas d'assurance, je participe en connaissance de cause</label>
-      </div>
-    </div>`;
-  }
-
-  html += `<div style="margin:16px 0">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500">
-        <input type="checkbox" id="accept-cb" onchange="toggleSig(this.checked)"> J'ai lu et j'accepte les termes de ce document
-      </label>
-    </div>
-    <div id="sig-section" style="display:none">
-      <div class="form-label">Votre signature</div>
-      <div class="sig-area" id="sig-area">
-        <canvas id="sig-canvas" width="660" height="180"></canvas>
-        <div class="sig-placeholder" id="sig-ph">Signez ici</div>
-      </div>
-      <div style="display:flex;gap:8px;margin:8px 0">
-        <button class="btn btn-outline" style="flex:1" onclick="clearSig()">🗑 Effacer</button>
-      </div>
-      <button class="btn btn-primary" onclick="submitSignature()">✅ Confirmer la signature</button>
-      <p id="sig-msg" style="text-align:center;font-size:13px;margin-top:8px"></p>
+    <iframe id="pdf-frame" class="pdf-frame" style="display:none"></iframe>
+    <div style="margin-top:16px;text-align:center">
+      <button class="btn btn-primary" onclick="markRead(${idx})" style="width:auto;padding:12px 32px">✅ J'ai lu ce document — Continuer</button>
     </div>
   </div>`;
-
-  app.innerHTML = html;
   loadPDFPreview(doc);
+}
+
+function markRead(idx) {
+  docsRead[DOCS[idx].id] = true;
+  renderForm();
 }
 
 async function loadPDFPreview(doc) {
@@ -329,13 +357,9 @@ async function loadPDFPreview(doc) {
   } catch(e) { document.getElementById('pdf-loading').textContent = '❌ Erreur PDF: '+e.message; }
 }
 
-function toggleSig(show) {
-  document.getElementById('sig-section').style.display = show ? 'block' : 'none';
-  if (show) initSigPad();
-}
-
 function initSigPad() {
   sigCanvas = document.getElementById('sig-canvas');
+  if (!sigCanvas) return;
   sigCtx = sigCanvas.getContext('2d');
   sigHasContent = false;
   const r = sigCanvas.parentElement.getBoundingClientRect();
@@ -353,37 +377,41 @@ function initSigPad() {
 
 function clearSig() { if(sigCtx) { sigCtx.clearRect(0,0,sigCanvas.width,sigCanvas.height); sigHasContent=false; document.getElementById('sig-ph').style.display='block'; } }
 
-async function submitSignature() {
-  if (!document.getElementById('accept-cb')?.checked) { alert('Veuillez cocher la case d\'acceptation.'); return; }
+async function submitAllSignatures() {
+  if (!document.getElementById('accept-all-cb')?.checked) { alert('Veuillez cocher la case d\'acceptation.'); return; }
   if (!sigHasContent) { alert('Veuillez signer.'); return; }
 
-  const doc = DOCS[currentDocIdx];
   const insChoice = document.querySelector('input[name="ins"]:checked')?.value || null;
-
+  const sigImage = sigCanvas.toDataURL('image/png');
   const msgEl = document.getElementById('sig-msg');
-  msgEl.innerHTML = '<span style="color:var(--text2)">⏳ Envoi en cours...</span>';
+  msgEl.innerHTML = '<span style="color:var(--text2)">⏳ Envoi des signatures pour les 4 documents...</span>';
 
-  try {
-    const sigData = {
-      pilot_id: pilot.id,
-      doc_id: doc.id,
-      signature_image: sigCanvas.toDataURL('image/png'),
-      insurance_choice: insChoice,
-      user_agent: navigator.userAgent
-    };
-
-    await sbFetch('signatures', {
-      method: 'POST',
-      body: JSON.stringify(sigData),
-      prefer: 'return=representation,resolution=merge-duplicates'
-    });
-
-    sigs[doc.id] = { ...sigData, signed_at: new Date().toISOString() };
-    msgEl.innerHTML = '<span style="color:var(--success)">✅ Signature enregistrée !</span>';
-    setTimeout(() => renderForm(), 1500);
-  } catch(err) {
-    msgEl.innerHTML = '<span style="color:var(--accent)">❌ Erreur: '+err.message+'</span>';
+  let count = 0;
+  for (const doc of DOCS) {
+    if (sigs[doc.id]) { count++; continue; } // already signed
+    try {
+      const sigData = {
+        pilot_id: pilot.id,
+        doc_id: doc.id,
+        signature_image: sigImage,
+        insurance_choice: doc.pdfKey === 'team_mrl_decharge' ? insChoice : null,
+        user_agent: navigator.userAgent
+      };
+      await sbFetch('signatures', {
+        method: 'POST',
+        body: JSON.stringify(sigData),
+        prefer: 'return=representation,resolution=merge-duplicates'
+      });
+      sigs[doc.id] = { ...sigData, signed_at: new Date().toISOString() };
+      count++;
+      msgEl.innerHTML = `<span style="color:var(--text2)">⏳ ${count}/${DOCS.length} documents signés...</span>`;
+    } catch(err) {
+      msgEl.innerHTML = `<span style="color:var(--accent)">❌ Erreur sur ${doc.title}: ${err.message}</span>`;
+      return;
+    }
   }
+  msgEl.innerHTML = '<span style="color:var(--success)">✅ Les 4 documents ont été signés !</span>';
+  setTimeout(() => renderForm(), 1500);
 }
 
 // === PDF DOWNLOAD ===
