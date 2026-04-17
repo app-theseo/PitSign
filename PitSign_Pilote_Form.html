@@ -188,9 +188,9 @@ async function init() {
     sigs = {};
     (signatures || []).forEach(s => { sigs[s.doc_id] = s; });
 
-    // Load alerts and sessions
-    currentAlerts = await sbFetch(`alerts?event_id=eq.${pilot.event_id}&active=eq.true&select=*&order=created_at.desc&limit=1`) || [];
-    currentSessions = await sbFetch(`sessions_planning?event_id=eq.${pilot.event_id}&select=*&order=sort_order.asc,start_time.asc`) || [];
+    // Load alerts and sessions (fault-tolerant if tables don't exist yet)
+    try { currentAlerts = await sbFetch(`alerts?event_id=eq.${pilot.event_id}&active=eq.true&select=*&order=created_at.desc&limit=1`) || []; } catch(e) { currentAlerts=[]; }
+    try { currentSessions = await sbFetch(`sessions_planning?event_id=eq.${pilot.event_id}&select=*&order=sort_order.asc,start_time.asc`) || []; } catch(e) { currentSessions=[]; }
 
     renderForm();
     startPilotRealtime();
@@ -210,8 +210,8 @@ function startPilotRealtime() {
       if (msg.event==='INSERT'||msg.event==='UPDATE'||msg.event==='DELETE') {
         // Reload alerts and sessions
         try {
-          currentAlerts = await sbFetch(`alerts?event_id=eq.${pilot.event_id}&active=eq.true&select=*&order=created_at.desc&limit=1`) || [];
-          currentSessions = await sbFetch(`sessions_planning?event_id=eq.${pilot.event_id}&select=*&order=sort_order.asc,start_time.asc`) || [];
+          currentAlerts = await sbFetch(`alerts?event_id=eq.${pilot.event_id}&active=eq.true&select=*&order=created_at.desc&limit=1`).catch(()=>[]) || [];
+          currentSessions = await sbFetch(`sessions_planning?event_id=eq.${pilot.event_id}&select=*&order=sort_order.asc,start_time.asc`).catch(()=>[]) || [];
           renderAlertBanner();
           renderPilotPlanning();
 
@@ -246,27 +246,19 @@ function triggerAlertNotification(alert) {
 }
 
 function renderAlertBanner() {
-  let banner = document.getElementById('pilot-alert-banner');
-  if (!banner) {
-    banner = document.createElement('div');
-    banner.id = 'pilot-alert-banner';
-    const app = document.getElementById('app');
-    app.parentNode.insertBefore(banner, app);
-  }
+  let banner = document.getElementById('pilot-alert-zone');
+  if (!banner) return;
 
   const active = currentAlerts.find(a => a.active);
-  if (!active) { banner.innerHTML = ''; banner.style.display = 'none'; return; }
+  if (!active) { banner.innerHTML = ''; return; }
 
   const flagColors = {'red_flag':'#e63946','yellow_flag':'#f39c12','green_flag':'#2ecc71','session_end':'#3498db','info':'#9b59b6'};
   const c = flagColors[active.type] || '#3498db';
   const isRed = active.type === 'red_flag';
 
-  banner.style.display = 'block';
-  banner.innerHTML = `<div style="margin:0 auto;max-width:700px;padding:0 16px;margin-bottom:8px">
-    <div style="padding:16px 20px;background:${c};border-radius:var(--radius-lg);text-align:center;${isRed?'animation:tvPulse 1.5s infinite;':''}">
-      <div style="font-family:Rajdhani;font-weight:700;font-size:22px;color:white">${active.title}</div>
-      <div style="color:rgba(255,255,255,0.9);font-size:14px;margin-top:4px">${active.message}</div>
-    </div>
+  banner.innerHTML = `<div style="padding:16px 20px;background:${c};border-radius:var(--radius-lg);text-align:center;margin-bottom:12px;${isRed?'animation:tvPulse 1.5s infinite;':''}">
+    <div style="font-family:Rajdhani;font-weight:700;font-size:22px;color:white">${active.title}</div>
+    <div style="color:rgba(255,255,255,0.9);font-size:14px;margin-top:4px">${active.message}</div>
   </div>`;
 }
 
@@ -281,26 +273,88 @@ function renderPilotPlanning() {
   if (!sessions.length) { planEl.innerHTML = ''; return; }
 
   const catColors = {'Débutant':'#2ecc71','Inter 1':'#f39c12','Inter 2':'#e63946','Expert':'#3498db','Pause':'#8888a0'};
-  const activeSess = sessions.find(s => s.status === 'active');
+  const catEmojis = {'Débutant':'🟢','Inter 1':'🟠','Inter 2':'🔴','Expert':'🔵','Pause':'⏸️'};
 
-  planEl.innerHTML = `<div class="card">
-    <div class="card-title">📅 Planning du jour</div>
-    ${activeSess ? `<div style="padding:12px;background:${catColors[activeSess.category]||'#3498db'}22;border:1px solid ${catColors[activeSess.category]||'#3498db'};border-radius:var(--radius);margin-bottom:12px;text-align:center">
-      <div style="font-weight:700;color:${catColors[activeSess.category]||'#3498db'}">▶️ EN PISTE : ${activeSess.category}</div>
-      <div style="font-size:13px;color:var(--text2)">${activeSess.start_time} - ${activeSess.end_time}</div>
-    </div>` : ''}
-    <div style="display:flex;flex-wrap:wrap;gap:6px">
-      ${sessions.map(s => {
-        const c = catColors[s.category] || '#8888a0';
-        const isActive = s.status === 'active';
-        const isDone = s.status === 'completed';
-        return `<div style="padding:6px 12px;border-radius:6px;font-size:13px;border:1px solid ${isActive?c:'var(--border)'};background:${isActive?c+'22':'transparent'};color:${isDone?'var(--text-muted)':isActive?c:'var(--text2)'};${isDone?'text-decoration:line-through;':''}font-weight:${isActive?'700':'400'}">
-          ${s.start_time} ${s.category}
-        </div>`;
-      }).join('')}
-    </div>
-  </div>`;
+  // Current time for comparison
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  function timeToMin(t) { const [h,m] = t.split(':').map(Number); return h*60+m; }
+
+  // Find active session (by status or by time)
+  let activeIdx = sessions.findIndex(s => s.status === 'active');
+  if (activeIdx === -1) {
+    activeIdx = sessions.findIndex(s => {
+      const start = timeToMin(s.start_time);
+      const end = timeToMin(s.end_time);
+      return nowMin >= start && nowMin < end;
+    });
+  }
+
+  const activeSess = activeIdx >= 0 ? sessions[activeIdx] : null;
+  const pilotCat = pilot.category || '';
+
+  let h = `<div class="card" style="padding:0;overflow:hidden">
+    <div style="padding:16px 20px;background:linear-gradient(135deg,rgba(230,57,70,0.1),rgba(52,152,219,0.05));border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div style="font-family:Rajdhani;font-weight:700;font-size:18px">📅 Planning ${day.charAt(0).toUpperCase()+day.slice(1)}</div>
+        <div style="font-size:13px;color:var(--text2)">${now.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</div>
+      </div>`;
+
+  if (activeSess) {
+    const ac = catColors[activeSess.category] || '#3498db';
+    h += `<div style="margin-top:12px;padding:14px;background:${ac}22;border:2px solid ${ac};border-radius:var(--radius);text-align:center">
+      <div style="font-size:12px;color:${ac};text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-bottom:4px">En piste actuellement</div>
+      <div style="font-family:Rajdhani;font-weight:700;font-size:24px;color:white">${catEmojis[activeSess.category]||''} ${activeSess.category}</div>
+      <div style="font-size:14px;color:var(--text2);margin-top:2px">${activeSess.start_time} — ${activeSess.end_time}</div>
+    </div>`;
+  }
+
+  h += `</div><div style="padding:12px 16px">`;
+
+  // Group by time blocks (sessions of 4 = 1h block)
+  sessions.forEach((s, i) => {
+    const start = timeToMin(s.start_time);
+    const end = timeToMin(s.end_time);
+    const isPast = nowMin >= end && s.status !== 'active';
+    const isActive = i === activeIdx;
+    const isNext = !isActive && !isPast && (activeIdx === -1 || i === activeIdx + 1);
+    const isMyCategory = s.category === pilotCat || s.category.includes(pilotCat);
+    const c = catColors[s.category] || '#8888a0';
+
+    // Separator before lunch break
+    if (s.category === 'Pause' && s.start_time === '12:00') {
+      h += `<div style="padding:8px 0;margin:4px 0"><div style="height:1px;background:var(--border)"></div></div>`;
+    }
+
+    h += `<div style="display:flex;align-items:center;gap:12px;padding:8px 10px;border-radius:var(--radius);margin-bottom:4px;${isActive?'background:'+c+'22;border:1px solid '+c+';':isMyCategory&&!isPast?'background:rgba(255,255,255,0.03);border:1px solid '+c+'44;':'border:1px solid transparent;'}${isPast?'opacity:0.4;':''}transition:all 0.3s">
+      <div style="width:52px;text-align:center;flex-shrink:0">
+        <div style="font-family:Rajdhani;font-weight:700;font-size:${isActive?'16':'14'}px;color:${isActive?c:'var(--text2)'}">${s.start_time}</div>
+      </div>
+      <div style="width:4px;height:${s.category==='Pause'?'20':'32'}px;border-radius:2px;background:${isPast?'var(--border)':c};flex-shrink:0;${isActive?'box-shadow:0 0 8px '+c+';':''}"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:${isActive||isMyCategory?'700':'500'};font-size:${isActive?'15':'14'}px;color:${isPast?'var(--text-muted)':isActive?'white':'var(--text2)'}">${catEmojis[s.category]||''} ${s.category}${s.notes?' — '+s.notes:''}</div>
+        ${isActive?'<div style="font-size:12px;color:'+c+';font-weight:600;margin-top:2px">▶ EN COURS</div>':''}
+        ${isNext?'<div style="font-size:12px;color:var(--text2);margin-top:2px">⏭ Prochaine</div>':''}
+      </div>
+      <div style="font-size:12px;color:var(--text-muted);flex-shrink:0">${s.end_time}</div>
+    </div>`;
+
+    // Separator after lunch break
+    if (s.category === 'Pause' && s.start_time === '12:00') {
+      h += `<div style="padding:4px 0;margin:4px 0"><div style="height:1px;background:var(--border)"></div></div>`;
+    }
+  });
+
+  h += `</div></div>`;
+  planEl.innerHTML = h;
 }
+
+// Auto-refresh planning every 60s to update time-based highlighting
+setInterval(() => {
+  const allSigned = DOCS.every(d => sigs[d.id]);
+  if (allSigned) renderPilotPlanning();
+}, 60000);
 
 function showError(msg) {
   document.getElementById('app').innerHTML = `<div class="card" style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⚠️</div><p style="color:var(--text2)">${msg}</p></div>`;
@@ -316,15 +370,16 @@ function renderForm() {
       <div><div style="font-weight:600;font-size:18px">${pilot.nom} ${pilot.prenom}</div>
       <div style="font-size:13px;color:var(--text2)">${pilot.category || ''} — ${(pilot.days||[]).join(' + ')}</div></div>
     </div>
-  </div>
-
-  <div id="pilot-planning-section"></div>`;
+  </div>`;
 
   if (allSigned) {
-    // === SIMPLIFIED VIEW — all documents signed ===
-    html += `<div style="text-align:center;padding:24px;background:var(--success-bg);border-radius:var(--radius-lg);border:1px solid rgba(46,204,113,0.3);margin-bottom:16px">
-      <div style="font-size:48px;margin-bottom:8px">🏁</div>
-      <div style="font-size:20px;font-weight:600;color:var(--success)">Tous vos documents sont signés !</div>
+    // === PILOT DASHBOARD — all documents signed ===
+    html += `<div id="pilot-alert-zone"></div>
+    <div id="pilot-planning-section"></div>
+
+    <div style="text-align:center;padding:20px;background:var(--success-bg);border-radius:var(--radius-lg);border:1px solid rgba(46,204,113,0.3);margin-bottom:16px">
+      <div style="font-size:40px;margin-bottom:8px">🏁</div>
+      <div style="font-size:18px;font-weight:600;color:var(--success)">Tous vos documents sont signés !</div>
       <p style="color:var(--text2);font-size:14px;margin-top:8px">Présentez-vous à l'accueil le jour J pour valider votre check-in.</p>
     </div>
 
@@ -454,9 +509,11 @@ function renderForm() {
     });
   }
 
-  // Render live sections
-  renderAlertBanner();
-  renderPilotPlanning();
+  // Render live sections only for signed pilots
+  if (allSigned) {
+    renderAlertBanner();
+    renderPilotPlanning();
+  }
 }
 
 async function saveInfo() {
