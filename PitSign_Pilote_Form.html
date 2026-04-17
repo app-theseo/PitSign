@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>PitSign — Formulaire Pilote</title>
+<meta name="application-name" content="PitSign Pilote">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PitSign">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a0c">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='15' fill='%23e63946'/><text x='50' y='68' text-anchor='middle' font-size='50' font-family='sans-serif' font-weight='bold' fill='white'>🏁</text></svg>">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='15' fill='%23e63946'/><text x='50' y='68' text-anchor='middle' font-size='50' font-family='sans-serif' font-weight='bold' fill='white'>🏁</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <style>
@@ -48,6 +56,7 @@ body::before { content:''; position:fixed; inset:0; background:repeating-linear-
 .loading { text-align:center; padding:60px 20px; }
 .loading-spinner { display:inline-block; width:40px; height:40px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
+@keyframes tvPulse { 0%,100% { opacity:1; } 50% { opacity:0.85; } }
 .success-banner { text-align:center; padding:40px 20px; }
 .success-icon { font-size:64px; margin-bottom:16px; }
 .insurance-opt { display:flex; gap:12px; margin:8px 0; flex-wrap:wrap; }
@@ -73,6 +82,31 @@ body::before { content:''; position:fixed; inset:0; background:repeating-linear-
 </div>
 
 <script>
+// === PWA SETUP ===
+(function setupPWA() {
+  const manifest = {
+    name: 'PitSign Pilote',
+    short_name: 'PitSign',
+    description: 'Formulaire pilote — Documents & Alertes piste',
+    start_url: location.href.split('?')[0] + location.search,
+    display: 'standalone',
+    background_color: '#0a0a0c',
+    theme_color: '#0a0a0c',
+    orientation: 'any',
+    icons: [{ src: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="80" fill="%23e63946"/><text x="256" y="340" text-anchor="middle" font-size="280" font-family="sans-serif">🏁</text></svg>', sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }]
+  };
+  const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+  const link = document.createElement('link');
+  link.rel = 'manifest'; link.href = URL.createObjectURL(blob);
+  document.head.appendChild(link);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {
+      const swCode = `self.addEventListener('install',e=>{self.skipWaiting()});self.addEventListener('activate',e=>{e.waitUntil(clients.claim())});self.addEventListener('fetch',e=>{e.respondWith(fetch(e.request).catch(()=>new Response('Offline',{status:503})))});`;
+      navigator.serviceWorker.register(URL.createObjectURL(new Blob([swCode],{type:'application/javascript'}))).catch(()=>{});
+    });
+  }
+})();
+
 const SUPABASE_URL = "https://pnmkbuygzsvsuedoxbwf.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBubWtidXlnenN2c3VlZG94YndmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwOTcwNjksImV4cCI6MjA4OTY3MzA2OX0.nOpLz7vpA_fs5EWsixLppUbxkwomtxh74jo0PBkXknA";
 const DOCS = [
@@ -137,6 +171,9 @@ async function sbFetch(path, opts = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+let currentAlerts = [];
+let currentSessions = [];
+
 async function init() {
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token');
@@ -151,8 +188,118 @@ async function init() {
     sigs = {};
     (signatures || []).forEach(s => { sigs[s.doc_id] = s; });
 
+    // Load alerts and sessions
+    currentAlerts = await sbFetch(`alerts?event_id=eq.${pilot.event_id}&active=eq.true&select=*&order=created_at.desc&limit=1`) || [];
+    currentSessions = await sbFetch(`sessions_planning?event_id=eq.${pilot.event_id}&select=*&order=sort_order.asc,start_time.asc`) || [];
+
     renderForm();
+    startPilotRealtime();
   } catch (err) { showError('Erreur de connexion : ' + err.message); }
+}
+
+function startPilotRealtime() {
+  try {
+    const ws = new WebSocket(SUPABASE_URL.replace('https://','wss://')+'/realtime/v1/websocket?apikey='+SUPABASE_KEY+'&vsn=1.0.0');
+    ws.onopen = () => {
+      ws.send(JSON.stringify({topic:'realtime:public:alerts',event:'phx_join',payload:{},ref:'1'}));
+      ws.send(JSON.stringify({topic:'realtime:public:sessions_planning',event:'phx_join',payload:{},ref:'2'}));
+      setInterval(()=>ws.send(JSON.stringify({topic:'phoenix',event:'heartbeat',payload:{},ref:'hb'})),30000);
+    };
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.event==='INSERT'||msg.event==='UPDATE'||msg.event==='DELETE') {
+        // Reload alerts and sessions
+        try {
+          currentAlerts = await sbFetch(`alerts?event_id=eq.${pilot.event_id}&active=eq.true&select=*&order=created_at.desc&limit=1`) || [];
+          currentSessions = await sbFetch(`sessions_planning?event_id=eq.${pilot.event_id}&select=*&order=sort_order.asc,start_time.asc`) || [];
+          renderAlertBanner();
+          renderPilotPlanning();
+
+          // Trigger alert notification if new active alert
+          if (msg.event==='INSERT' && msg.payload?.record?.active) {
+            triggerAlertNotification(msg.payload.record);
+          }
+        } catch(err) { console.error(err); }
+      }
+    };
+    ws.onerror = () => console.log('Realtime: reconnecting...');
+    ws.onclose = () => setTimeout(startPilotRealtime, 5000);
+  } catch(e) { setTimeout(startPilotRealtime, 5000); }
+}
+
+function triggerAlertNotification(alert) {
+  // Vibrate if available
+  if (navigator.vibrate) {
+    if (alert.type === 'red_flag') navigator.vibrate([300,100,300,100,300]);
+    else navigator.vibrate([200,100,200]);
+  }
+  // Play alert sound
+  try {
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = alert.type==='red_flag' ? 800 : 600;
+    gain.gain.value = 0.3;
+    osc.start(); osc.stop(ctx.currentTime + 0.5);
+  } catch(e) {}
+}
+
+function renderAlertBanner() {
+  let banner = document.getElementById('pilot-alert-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'pilot-alert-banner';
+    const app = document.getElementById('app');
+    app.parentNode.insertBefore(banner, app);
+  }
+
+  const active = currentAlerts.find(a => a.active);
+  if (!active) { banner.innerHTML = ''; banner.style.display = 'none'; return; }
+
+  const flagColors = {'red_flag':'#e63946','yellow_flag':'#f39c12','green_flag':'#2ecc71','session_end':'#3498db','info':'#9b59b6'};
+  const c = flagColors[active.type] || '#3498db';
+  const isRed = active.type === 'red_flag';
+
+  banner.style.display = 'block';
+  banner.innerHTML = `<div style="margin:0 auto;max-width:700px;padding:0 16px;margin-bottom:8px">
+    <div style="padding:16px 20px;background:${c};border-radius:var(--radius-lg);text-align:center;${isRed?'animation:tvPulse 1.5s infinite;':''}">
+      <div style="font-family:Rajdhani;font-weight:700;font-size:22px;color:white">${active.title}</div>
+      <div style="color:rgba(255,255,255,0.9);font-size:14px;margin-top:4px">${active.message}</div>
+    </div>
+  </div>`;
+}
+
+function renderPilotPlanning() {
+  let planEl = document.getElementById('pilot-planning-section');
+  if (!planEl) return;
+
+  const today = new Date().getDay();
+  const day = today === 0 ? 'dimanche' : 'samedi';
+  const sessions = currentSessions.filter(s => s.day === day);
+
+  if (!sessions.length) { planEl.innerHTML = ''; return; }
+
+  const catColors = {'Débutant':'#2ecc71','Inter 1':'#f39c12','Inter 2':'#e63946','Expert':'#3498db','Pause':'#8888a0'};
+  const activeSess = sessions.find(s => s.status === 'active');
+
+  planEl.innerHTML = `<div class="card">
+    <div class="card-title">📅 Planning du jour</div>
+    ${activeSess ? `<div style="padding:12px;background:${catColors[activeSess.category]||'#3498db'}22;border:1px solid ${catColors[activeSess.category]||'#3498db'};border-radius:var(--radius);margin-bottom:12px;text-align:center">
+      <div style="font-weight:700;color:${catColors[activeSess.category]||'#3498db'}">▶️ EN PISTE : ${activeSess.category}</div>
+      <div style="font-size:13px;color:var(--text2)">${activeSess.start_time} - ${activeSess.end_time}</div>
+    </div>` : ''}
+    <div style="display:flex;flex-wrap:wrap;gap:6px">
+      ${sessions.map(s => {
+        const c = catColors[s.category] || '#8888a0';
+        const isActive = s.status === 'active';
+        const isDone = s.status === 'completed';
+        return `<div style="padding:6px 12px;border-radius:6px;font-size:13px;border:1px solid ${isActive?c:'var(--border)'};background:${isActive?c+'22':'transparent'};color:${isDone?'var(--text-muted)':isActive?c:'var(--text2)'};${isDone?'text-decoration:line-through;':''}font-weight:${isActive?'700':'400'}">
+          ${s.start_time} ${s.category}
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
 }
 
 function showError(msg) {
@@ -170,6 +317,8 @@ function renderForm() {
       <div style="font-size:13px;color:var(--text2)">${pilot.category || ''} — ${(pilot.days||[]).join(' + ')}</div></div>
     </div>
   </div>
+
+  <div id="pilot-planning-section"></div>
 
   <div class="card">
     <div class="card-title">📋 Informations personnelles</div>
@@ -279,6 +428,10 @@ function renderForm() {
       if (this.checked) initSigPad();
     });
   }
+
+  // Render live sections
+  renderAlertBanner();
+  renderPilotPlanning();
 }
 
 async function saveInfo() {
