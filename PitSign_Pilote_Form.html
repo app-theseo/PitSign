@@ -318,9 +318,49 @@ function renderForm() {
     </div>
   </div>
 
-  <div id="pilot-planning-section"></div>
+  <div id="pilot-planning-section"></div>`;
 
-  <div class="card">
+  if (allSigned) {
+    // === SIMPLIFIED VIEW — all documents signed ===
+    html += `<div style="text-align:center;padding:24px;background:var(--success-bg);border-radius:var(--radius-lg);border:1px solid rgba(46,204,113,0.3);margin-bottom:16px">
+      <div style="font-size:48px;margin-bottom:8px">🏁</div>
+      <div style="font-size:20px;font-weight:600;color:var(--success)">Tous vos documents sont signés !</div>
+      <p style="color:var(--text2);font-size:14px;margin-top:8px">Présentez-vous à l'accueil le jour J pour valider votre check-in.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📥 Vos documents signés</div>`;
+    DOCS.forEach(d => {
+      const signed = sigs[d.id];
+      if(signed) {
+        html += `<div class="doc-card signed">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div><div class="doc-title">✅ ${d.title}</div>
+            <div class="doc-status">Signé le ${new Date(signed.signed_at).toLocaleString('fr-FR')}</div></div>
+            <button class="btn-outline btn" style="width:auto;padding:6px 12px;font-size:12px" onclick="downloadSignedPDF('${d.id}','${d.pdfKey}','${d.title}')">📥 PDF</button>
+          </div>
+        </div>`;
+      }
+    });
+    html += `<button class="btn btn-primary" onclick="downloadAllPDFs()" style="width:100%;margin-top:12px;padding:14px">📥 Télécharger tous mes documents</button>
+      <p id="dl-all-msg" style="font-size:12px;color:var(--text2);margin-top:8px;text-align:center"></p>
+    </div>
+
+    <div class="card" style="border:1px solid var(--border)">
+      <div class="card-title">📋 Mes informations</div>
+      <div style="font-size:14px;color:var(--text2);line-height:1.8">
+        <div><strong>Nom :</strong> ${pilot.nom} ${pilot.prenom}</div>
+        <div><strong>N° :</strong> ${pilot.number}</div>
+        ${pilot.date_naissance?`<div><strong>DDN :</strong> ${new Date(pilot.date_naissance+'T00:00:00').toLocaleDateString('fr-FR')}</div>`:''}
+        ${pilot.vehicule?`<div><strong>Véhicule :</strong> ${pilot.vehicule}</div>`:''}
+        ${pilot.telephone?`<div><strong>Tél :</strong> ${pilot.telephone}</div>`:''}
+        ${pilot.tel_urgence?`<div><strong>Tél urgence :</strong> ${pilot.tel_urgence}</div>`:''}
+      </div>
+    </div>`;
+
+  } else {
+    // === FULL FORM — documents not yet signed ===
+    html += `<div class="card">
     <div class="card-title">📋 Informations personnelles</div>
     <div class="field-row">
       <div class="form-group"><label class="form-label">Nom</label><input class="input" id="f-nom" value="${pilot.nom}" readonly></div>
@@ -351,69 +391,54 @@ function renderForm() {
   <div class="card">
     <div class="card-title">✍️ Documents à lire et signer</div>`;
 
-  const allRead = DOCS.every(d => sigs[d.id] || docsRead[d.id]);
-  const someUnsigned = DOCS.some(d => !sigs[d.id]);
+    const allRead = DOCS.every(d => sigs[d.id] || docsRead[d.id]);
+    const someUnsigned = DOCS.some(d => !sigs[d.id]);
 
-  DOCS.forEach((d, i) => {
-    const signed = sigs[d.id];
-    const read = docsRead[d.id];
-    html += `<div class="doc-card ${signed?'signed':read?'':''}">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <div><div class="doc-title">${signed?'✅':read?'👁':'⏳'} ${d.title}</div>
-        <div class="doc-status">${signed ? 'Signé le '+new Date(signed.signed_at).toLocaleString('fr-FR') : read ? '✓ Lu — en attente de signature' : 'À lire'}</div></div>
-        <div style="display:flex;gap:6px">
-          ${signed ? `<button class="btn-outline btn" style="width:auto;padding:6px 12px;font-size:12px" onclick="downloadSignedPDF('${d.id}','${d.pdfKey}','${d.title}')">📥 PDF</button><span class="badge badge-success">Signé</span>` : `<button class="btn-outline btn" style="width:auto;padding:8px 16px;font-size:13px" onclick="readDoc(${i})">${read?'👁 Relire':'📄 Lire le document'}</button>`}
+    DOCS.forEach((d, i) => {
+      const signed = sigs[d.id];
+      const read = docsRead[d.id];
+      html += `<div class="doc-card ${signed?'signed':read?'':''}">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <div><div class="doc-title">${signed?'✅':read?'👁':'⏳'} ${d.title}</div>
+          <div class="doc-status">${signed ? 'Signé le '+new Date(signed.signed_at).toLocaleString('fr-FR') : read ? '✓ Lu — en attente de signature' : 'À lire'}</div></div>
+          <div style="display:flex;gap:6px">
+            ${signed ? `<button class="btn-outline btn" style="width:auto;padding:6px 12px;font-size:12px" onclick="downloadSignedPDF('${d.id}','${d.pdfKey}','${d.title}')">📥 PDF</button><span class="badge badge-success">Signé</span>` : `<button class="btn-outline btn" style="width:auto;padding:8px 16px;font-size:13px" onclick="readDoc(${i})">${read?'👁 Relire':'📄 Lire le document'}</button>`}
+          </div>
         </div>
-      </div>
-    </div>`;
-  });
+      </div>`;
+    });
 
-  // Unified signature section (only if all read but not all signed)
-  if (allRead && someUnsigned) {
-    html += `<div style="margin-top:20px;padding:20px;background:var(--card);border:2px solid var(--accent);border-radius:var(--radius-lg)">
-      <div style="font-family:Rajdhani;font-weight:700;font-size:18px;margin-bottom:4px">✅ Tous les documents ont été lus</div>
-      <p style="color:var(--text2);font-size:14px;margin-bottom:16px">En signant ci-dessous, vous acceptez l'ensemble des 4 documents présentés.</p>
-
-      <div style="padding:12px;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px">
-        <div class="form-label" style="margin-bottom:6px">Clause assurance — Article L321-1</div>
-        <div class="insurance-opt">
-          <label><input type="radio" name="ins" value="souscrit"> J'ai souscrit une assurance</label>
-          <label><input type="radio" name="ins" value="nonSouscrit" checked> Pas d'assurance, je participe en connaissance de cause</label>
+    if (allRead && someUnsigned) {
+      html += `<div style="margin-top:20px;padding:20px;background:var(--card);border:2px solid var(--accent);border-radius:var(--radius-lg)">
+        <div style="font-family:Rajdhani;font-weight:700;font-size:18px;margin-bottom:4px">✅ Tous les documents ont été lus</div>
+        <p style="color:var(--text2);font-size:14px;margin-bottom:16px">En signant ci-dessous, vous acceptez l'ensemble des 4 documents présentés.</p>
+        <div style="padding:12px;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px">
+          <div class="form-label" style="margin-bottom:6px">Clause assurance — Article L321-1</div>
+          <div class="insurance-opt">
+            <label><input type="radio" name="ins" value="souscrit"> J'ai souscrit une assurance</label>
+            <label><input type="radio" name="ins" value="nonSouscrit" checked> Pas d'assurance, je participe en connaissance de cause</label>
+          </div>
         </div>
-      </div>
-
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin-bottom:16px">
-        <input type="checkbox" id="accept-all-cb"> J'ai lu et j'accepte les termes des 4 documents ci-dessus
-      </label>
-
-      <div id="sig-unified" style="display:none">
-        <div class="form-label">Votre signature (valable pour les 4 documents)</div>
-        <div class="sig-area" id="sig-area">
-          <canvas id="sig-canvas" width="660" height="180"></canvas>
-          <div class="sig-placeholder" id="sig-ph">Signez ici</div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:500;margin-bottom:16px">
+          <input type="checkbox" id="accept-all-cb"> J'ai lu et j'accepte les termes des 4 documents ci-dessus
+        </label>
+        <div id="sig-unified" style="display:none">
+          <div class="form-label">Votre signature (valable pour les 4 documents)</div>
+          <div class="sig-area" id="sig-area">
+            <canvas id="sig-canvas" width="660" height="180"></canvas>
+            <div class="sig-placeholder" id="sig-ph">Signez ici</div>
+          </div>
+          <div style="display:flex;gap:8px;margin:8px 0">
+            <button class="btn btn-outline" style="flex:1" onclick="clearSig()">🗑 Effacer</button>
+          </div>
+          <button class="btn btn-primary" onclick="submitAllSignatures()" style="font-size:16px;padding:14px">✅ Signer les 4 documents</button>
+          <p id="sig-msg" style="text-align:center;font-size:13px;margin-top:8px"></p>
         </div>
-        <div style="display:flex;gap:8px;margin:8px 0">
-          <button class="btn btn-outline" style="flex:1" onclick="clearSig()">🗑 Effacer</button>
-        </div>
-        <button class="btn btn-primary" onclick="submitAllSignatures()" style="font-size:16px;padding:14px">✅ Signer les 4 documents</button>
-        <p id="sig-msg" style="text-align:center;font-size:13px;margin-top:8px"></p>
-      </div>
-    </div>`;
-  } else if (!someUnsigned) {
-    // All signed - no separate else needed, falls into allSigned below
-  } else {
-    const readCount = DOCS.filter(d => sigs[d.id] || docsRead[d.id]).length;
-    html += `<div style="text-align:center;color:var(--text-muted);padding:16px;margin-top:8px">📄 Lisez les ${DOCS.length - readCount} document(s) restant(s) pour débloquer la signature.</div>`;
-  }
-
-  if (allSigned) {
-    html += `<div style="text-align:center;padding:20px;background:var(--success-bg);border-radius:var(--radius-lg);border:1px solid rgba(46,204,113,0.3);margin-top:16px">
-      <div style="font-size:40px;margin-bottom:8px">🏁</div>
-      <div style="font-size:18px;font-weight:600;color:var(--success)">Tous les documents sont signés !</div>
-      <p style="color:var(--text2);font-size:14px;margin-top:8px">Présentez-vous à l'accueil le jour J pour valider votre check-in.</p>
-      <button class="btn btn-primary" onclick="downloadAllPDFs()" style="margin-top:16px;width:auto;padding:12px 32px">📥 Télécharger tous mes documents signés</button>
-      <p id="dl-all-msg" style="font-size:12px;color:var(--text2);margin-top:8px"></p>
-    </div>`;
+      </div>`;
+    } else if (someUnsigned) {
+      const readCount = DOCS.filter(d => sigs[d.id] || docsRead[d.id]).length;
+      html += `<div style="text-align:center;color:var(--text-muted);padding:16px;margin-top:8px">📄 Lisez les ${DOCS.length - readCount} document(s) restant(s) pour débloquer la signature.</div>`;
+    }
   }
 
   html += '</div>';
